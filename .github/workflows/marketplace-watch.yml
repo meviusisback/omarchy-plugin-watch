@@ -1,0 +1,57 @@
+name: marketplace-watch
+
+# Watches the Omarchy plugin marketplace for activity on our plugin issues and
+# pushes ONLY changes to the Hermes webhook route. Runs on GitHub's runners, so
+# the workstation never polls.
+#
+# The schedule is intentionally commented out until the repo secrets exist:
+#   HERMES_WEBHOOK_URL     https://<ingress>/webhooks/omarchy-marketplace-verify
+#   HERMES_WEBHOOK_SECRET  the route secret from `hermes webhook list`
+# Turn it on (uncomment + push) once a manual run reports HTTP 2xx.
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: marketplace-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          persist-credentials: true
+
+      - name: Scan the marketplace for new activity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HERMES_WEBHOOK_URL: ${{ secrets.HERMES_WEBHOOK_URL }}
+          HERMES_WEBHOOK_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+        run: python3 watch_marketplace.py
+
+      - name: Persist state (and a weekly heartbeat)
+        run: |
+          set -euo pipefail
+          git config user.name "plugin-watch"
+          git config user.email "actions@users.noreply.github.com"
+          # GitHub disables scheduled workflows after 60 days without repo
+          # activity, so touch the heartbeat at most once a week.
+          last=$(cat heartbeat 2>/dev/null || echo 1970-01-01)
+          today=$(date -u +%F)
+          if [ "$(date -u -d "$last" +%s)" -lt "$(date -u -d "$today -6 days" +%s)" ]; then
+            echo "$today" > heartbeat
+          fi
+          git add state/seen.json heartbeat 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no state change"
+          else
+            git commit -m "chore: update marketplace watch state"
+            git push
+          fi
